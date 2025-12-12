@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Http\Controllers\Teacher;
+namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\Classes;
@@ -11,20 +11,19 @@ class ClassController extends Controller
 {
     public function index()
     {
-        // Teacher hanya bisa lihat kelas mereka sendiri
-        $classes = Classes::where('teacher_id', auth()->id())
-            ->with(['teacher', 'treasurer'])
+        $classes = Classes::with(['teacher', 'treasurer', 'students'])
+            ->withCount(['students', 'activeStudents'])
             ->get();
         
-        return view('teacher.classes.index', compact('classes'));
+        return view('admin.classes.index', compact('classes'));
     }
     
     public function create()
     {
-        // Teacher bisa buat kelas baru, otomatis teacher_id = auth()->id()
+        $teachers = User::where('role', 'teacher')->get();
         $students = User::where('role', 'student')->whereNull('class_id')->get();
         
-        return view('teacher.classes.create', compact('students'));
+        return view('admin.classes.create', compact('teachers', 'students'));
     }
     
     public function store(Request $request)
@@ -33,16 +32,16 @@ class ClassController extends Controller
             'name' => 'required|string|max:100',
             'grade' => 'required|string|max:10',
             'major' => 'nullable|string|max:50',
+            'teacher_id' => 'required|exists:users,id',
             'student_ids' => 'nullable|array',
             'student_ids.*' => 'exists:users,id',
         ]);
         
-        // Teacher otomatis menjadi wali kelas
         $class = Classes::create([
             'name' => $validated['name'],
             'grade' => $validated['grade'],
             'major' => $validated['major'],
-            'teacher_id' => auth()->id(), // Otomatis teacher yang login
+            'teacher_id' => $validated['teacher_id'],
         ]);
         
         if (!empty($validated['student_ids'])) {
@@ -50,15 +49,12 @@ class ClassController extends Controller
                 ->update(['class_id' => $class->id]);
         }
         
-        return redirect()->route('teacher.classes.index')
+        return redirect()->route('admin.classes.index')
             ->with('success', 'Kelas berhasil dibuat!');
     }
     
     public function show(Classes $class)
     {
-        // Authorization: Teacher hanya bisa akses kelas mereka sendiri
-        $this->authorizeTeacherAccess($class);
-        
         $class->load(['teacher', 'treasurer', 'students']);
         $availableStudents = User::where('role', 'student')
             ->where(function($query) use ($class) {
@@ -71,14 +67,13 @@ class ClassController extends Controller
             ->where('is_active', true)
             ->count();
         
-        return view('teacher.classes.show', compact('class', 'availableStudents', 'unpaidCount'));
+        return view('admin.classes.show', compact('class', 'availableStudents', 'unpaidCount'));
     }
     
     public function edit(Classes $class)
     {
-        // Authorization: Teacher hanya bisa edit kelas mereka sendiri
-        $this->authorizeTeacherAccess($class);
-        
+        $class->load(['teacher', 'treasurer', 'students']);
+        $teachers = User::where('role', 'teacher')->get();
         $students = User::where('role', 'student')
             ->where(function($query) use ($class) {
                 $query->whereNull('class_id')
@@ -86,18 +81,16 @@ class ClassController extends Controller
             })
             ->get();
         
-        return view('teacher.classes.edit', compact('class', 'students'));
+        return view('admin.classes.edit', compact('class', 'teachers', 'students'));
     }
     
     public function update(Request $request, Classes $class)
     {
-        // Authorization: Teacher hanya bisa edit kelas mereka sendiri
-        $this->authorizeTeacherAccess($class);
-        
         $validated = $request->validate([
             'name' => 'required|string|max:100',
             'grade' => 'required|string|max:10',
             'major' => 'nullable|string|max:50',
+            'teacher_id' => 'required|exists:users,id',
             'student_ids' => 'nullable|array',
             'student_ids.*' => 'exists:users,id',
             'treasurer_id' => 'nullable|exists:users,id',
@@ -108,6 +101,7 @@ class ClassController extends Controller
             'name' => $validated['name'],
             'grade' => $validated['grade'],
             'major' => $validated['major'],
+            'teacher_id' => $validated['teacher_id'],
             'treasurer_id' => $validated['treasurer_id'] ?? null,
         ]);
         
@@ -136,27 +130,30 @@ class ClassController extends Controller
                 ->update(['role' => 'treasurer']);
         }
         
-        // Handle status (Teacher tidak bisa hapus, hanya nonaktifkan)
+        // Handle status
         if ($validated['status'] === 'inactive' && !$class->deleted_at) {
             $class->delete();
         } elseif ($validated['status'] === 'active' && $class->deleted_at) {
             $class->restore();
         }
         
-        return redirect()->route('teacher.classes.show', $class)
+        return redirect()->route('admin.classes.show', $class)
             ->with('success', 'Kelas berhasil diperbarui!');
     }
     
     public function destroy(Classes $class)
     {
-        // Teacher TIDAK BOLEH menghapus kelas
-        return back()->with('error', 'Anda tidak diizinkan menghapus kelas.');
+        // Detach students from class
+        User::where('class_id', $class->id)->update(['class_id' => null]);
+        
+        $class->delete();
+        
+        return redirect()->route('admin.classes.index')
+            ->with('success', 'Kelas berhasil dihapus!');
     }
     
     public function addStudent(Request $request, Classes $class)
     {
-        $this->authorizeTeacherAccess($class);
-        
         $validated = $request->validate([
             'student_id' => 'required|exists:users,id',
         ]);
@@ -164,14 +161,12 @@ class ClassController extends Controller
         $student = User::find($validated['student_id']);
         $student->update(['class_id' => $class->id]);
         
-        return redirect()->route('teacher.classes.show', $class)
+        return redirect()->route('admin.classes.show', $class)
             ->with('success', 'Siswa berhasil ditambahkan ke kelas!');
     }
     
     public function removeStudent(Request $request, Classes $class, User $student)
     {
-        $this->authorizeTeacherAccess($class);
-        
         if ($student->class_id !== $class->id) {
             return back()->with('error', 'Siswa tidak berada di kelas ini');
         }
@@ -179,14 +174,5 @@ class ClassController extends Controller
         $student->update(['class_id' => null]);
         
         return back()->with('success', 'Siswa berhasil dihapus dari kelas!');
-    }
-    
-    private function authorizeTeacherAccess(Classes $class)
-    {
-        if ($class->teacher_id !== auth()->id()) {
-            abort(403, 'Anda hanya bisa mengakses kelas Anda sendiri.');
-        }
-        
-        return true;
     }
 }

@@ -20,7 +20,7 @@ return new class extends Migration
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
             $table->enum('role', ['admin', 'treasurer', 'student', 'teacher']);
-            $table->foreignId('class_id')->nullable()->constrained()->onDelete('set null');
+            $table->foreignId('class_id')->nullable();
             $table->boolean('is_active')->default(true);
             $table->rememberToken();
             $table->timestamps();
